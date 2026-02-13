@@ -1,0 +1,141 @@
+
+Задание 1.  Активность пользователей
+SELECT
+    u.id AS user_id,
+    u.username,
+    ur.role,
+    COUNT(ua.id) AS activity_count
+FROM
+    users u
+JOIN
+    user_roles ur ON u.id = ur.user_id
+LEFT JOIN
+    user_activity ua ON u.id = ua.user_id
+    AND ua.activity_date >= '2024-10-01'
+    AND ua.activity_date < '2024-11-01'  -- последний месяц (октябрь 2024)
+GROUP BY
+    u.id, u.username, ur.role
+ORDER BY
+    activity_count DESC;
+
+1) Выбираем нужные поля
+u.id — ID пользователя.
+u.username — имя пользователя.
+ur.role — роль пользователя.
+COUNT(ua.id) — количество активностей (считаем по ID записей в user_activity).
+2) Соединяем таблицы
+users (u) — основная таблица с пользователями.
+user_roles (ur) — соединяем по user_id, чтобы получить роль.
+user_activity (ua) — соединяем по user_id и фильтруем по дате:
+ua.activity_date >= '2024-10-01' — активности с 1 октября 2024.
+ua.activity_date < '2024-11-01' — до 1 ноября 2024 (т. е. весь октябрь).
+Используем LEFT JOIN для активностей, чтобы даже у пользователей без активностей строка осталась (с 0 в activity_count).
+3) Группируем данные
+По u.id, u.username, ur.role, чтобы посчитать активности для каждого пользователя и его роли.
+4) Сортируем результат
+По activity_count в порядке убывания (DESC), как требуется в задании.
+ 
+Задание 2.  Фильтрация транзакций
+-- Шаг 1. Находим совпадения «копейка в копейку» (условие 1)
+WITH exact_matches AS (
+    SELECT
+        t.inn,
+        t.credit_num,
+        t.account,
+        t.operation_datetime AS tranche_datetime,
+        t.operation_sum AS tranche_sum,
+        tx.operation_datetime AS transaction_datetime,
+        tx.operation_sum AS transaction_sum,
+        tx.ctrg_inn,
+        tx.ctrg_account,
+        t.doc_id AS tranche_doc_id,
+        tx.doc_id AS transaction_doc_id,
+        'exact' AS match_type  -- метка: точное совпадение
+    FROM
+        tranches t
+    JOIN
+        transactions tx
+        ON t.inn = tx.inn
+        AND t.account = tx.account
+        AND tx.operation_sum = t.operation_sum  -- сумма совпадает
+        AND tx.operation_datetime >= t.operation_datetime  -- транзакция после транша
+        AND tx.operation_datetime <= t.operation_datetime + INTERVAL '10 days'  -- в пределах T+10 дней
+    WHERE
+        EXTRACT(YEAR FROM t.operation_datetime) = 2024
+),
+
+-- Шаг 2. Находим транзакции, где сумма > суммы транша (условие 2)
+over_matches AS (
+    SELECT
+        t.inn,
+        t.credit_num,
+        t.account,
+        t.operation_datetime AS tranche_datetime,
+        t.operation_sum AS tranche_sum,
+        tx.operation_datetime AS transaction_datetime,
+        tx.operation_sum AS transaction_sum,
+        tx.ctrg_inn,
+        tx.ctrg_account,
+        t.doc_id AS tranche_doc_id,
+        tx.doc_id AS transaction_doc_id,
+        'over' AS match_type  -- метка: сумма транзакции > суммы транша
+    FROM
+        tranches t
+    JOIN
+        transactions tx
+        ON t.inn = tx.inn
+        AND t.account = tx.account
+        AND tx.operation_sum > t.operation_sum  -- сумма транзакции больше
+        AND tx.operation_datetime >= t.operation_datetime  -- транзакция после транша
+        AND tx.operation_datetime <= t.operation_datetime + INTERVAL '10 days'  -- в пределах T+10 дней
+    WHERE
+        EXTRACT(YEAR FROM t.operation_datetime) = 2024
+)
+
+-- Шаг 3. Объединяем результаты (сначала точные совпадения, потом «превышения»)
+SELECT * FROM exact_matches
+UNION ALL
+SELECT * FROM over_matches
+ORDER BY inn, credit_num, match_type, transaction_datetime;
+
+ 
+задание 3.  Оптимизация SQL запроса
+SELECT
+    c.client_id,
+    c.name,
+    c.age,
+    COUNT(a.account_id) AS total_accounts,
+    SUM(a.balance) AS total_balance,
+    SUM(CASE WHEN t.transaction_type = 'deposit' THEN 1 ELSE 0 END) AS total_deposits,
+    SUM(CASE WHEN t.transaction_type = 'withdrawal' THEN 1 ELSE 0 END) AS total_withdrawals
+FROM
+    clients c
+LEFT JOIN
+    accounts a ON c.client_id = a.client_id
+LEFT JOIN
+    transactions t ON a.account_id = t.account_id
+WHERE
+    c.registration_date >= '2020-01-01'
+GROUP BY
+    c.client_id, c.name, c.age
+ORDER BY
+    total_balance DESC;
+
+Описание внесённых изменений
+1) Замена подзапросов на JOIN + GROUP BY
+В исходном запросе использовались подзапросы в SELECT (по одному на каждое вычисляемое поле). Это неэффективно: для каждой строки из clients выполняются отдельные запросы к accounts и transactions.
+В оптимизированном варианте:
+Используются LEFT JOIN для соединения таблиц clients, accounts и transactions.
+Агрегация (подсчёт сумм, количеств) выполняется один раз через GROUP BY.
+Использование LEFT JOIN вместо внутренних подзапросов
+LEFT JOIN accounts a ON c.client_id = a.client_id — связывает клиентов с их счетами.
+LEFT JOIN transactions t ON a.account_id = t.account_id — связывает счета с транзакциями.
+LEFT JOIN гарантирует, что клиенты без счетов или транзакций всё равно попадут в результат (с NULL или 0).
+Группировка по ключевым полям
+2)GROUP BY c.client_id, c.name, c.age — группирует данные по клиенту, чтобы корректно применить агрегатные функции (COUNT, SUM).
+Гарантирует, что каждый клиент появится в результате ровно один раз.
+Сохранение логики фильтрации и сортировки
+WHERE c.registration_date >= '2020-01-01' — оставляет только клиентов, зарегистрированных с 2020 года (как в исходном запросе).
+ORDER BY total_balance DESC — сортировка по убыванию общего баланса (как в оригинале).
+Запрос стал короче и нагляднее.
+
